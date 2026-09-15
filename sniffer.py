@@ -397,6 +397,116 @@ def sniff_scapy(interface, count, bpf_filter, reporter):
 
 
 # ---------------------------------------------------------------------------
+# Optional GUI (Tkinter popup window instead of the terminal)
+# ---------------------------------------------------------------------------
+
+class GuiReporter(Reporter):
+    """Same as Reporter, but pushes each printed line into a thread-safe
+    queue for the Tk window to display, instead of writing to stdout."""
+
+    def __init__(self, line_queue, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.queue = line_queue
+
+    def emit(self, line, plain=None):
+        text = plain if plain is not None else strip_ansi(line)
+        self.queue.put(text)
+        if self.fh:
+            self.fh.write(text + "\n")
+            self.fh.flush()
+
+
+def run_gui(backend, interface, count, bpf_filter, write, show_payload, payload_bytes):
+    import os
+    import queue
+    import threading
+    import tkinter as tk
+    from tkinter import scrolledtext, font as tkfont
+
+    C.enabled = False  # no ANSI escape codes in a Tk Text widget
+
+    line_queue = queue.Queue()
+    reporter = GuiReporter(line_queue, write, show_payload, payload_bytes)
+    stop_event = threading.Event()
+
+    root = tk.Tk()
+    root.title("Network Sniffer")
+    root.geometry("1000x620")
+    root.configure(bg="#1e1e1e")
+
+    header = tk.Frame(root, bg="#1e1e1e")
+    header.pack(fill="x", padx=10, pady=(10, 0))
+    status_var = tk.StringVar(
+        value=f"backend={backend}  iface={interface or 'default'}"
+              f"{'  filter=' + bpf_filter if bpf_filter else ''}")
+    tk.Label(header, textvariable=status_var, fg="#dddddd", bg="#1e1e1e",
+             font=("Segoe UI", 10, "bold")).pack(side="left")
+    count_var = tk.StringVar(value="0 packets")
+    tk.Label(header, textvariable=count_var, fg="#9cdcfe", bg="#1e1e1e",
+             font=("Segoe UI", 10, "bold")).pack(side="right")
+
+    mono = tkfont.Font(family="Consolas", size=10)
+    text = scrolledtext.ScrolledText(root, bg="#1e1e1e", fg="#d4d4d4",
+                                      insertbackground="white", font=mono,
+                                      wrap="none", state="disabled")
+    text.pack(fill="both", expand=True, padx=10, pady=10)
+    text.tag_config("TCP", foreground="#4ec9b0")
+    text.tag_config("UDP", foreground="#569cd6")
+    text.tag_config("ICMP", foreground="#dcdcaa")
+    text.tag_config("ARP", foreground="#c586c0")
+    text.tag_config("DIM", foreground="#6a6a6a")
+
+    def on_close():
+        stop_event.set()
+        root.destroy()
+        os._exit(0)  # the capture thread may be blocked inside a C call
+
+    root.protocol("WM_DELETE_WINDOW", on_close)
+
+    def append_line(line):
+        tag = None
+        if line.startswith("["):
+            for proto in ("TCP", "UDP", "ICMP", "ARP"):
+                if proto in line:
+                    tag = proto
+                    break
+        elif line.startswith("      "):
+            tag = "DIM"
+        text.configure(state="normal")
+        text.insert("end", line + "\n", tag or ())
+        text.see("end")
+        text.configure(state="disabled")
+
+    def poll_queue():
+        try:
+            while True:
+                append_line(line_queue.get_nowait())
+        except queue.Empty:
+            pass
+        count_var.set(f"{reporter.count} packets")
+        root.after(100, poll_queue)
+
+    def capture_worker():
+        try:
+            if backend == "scapy":
+                from scapy.all import sniff
+                sniff(iface=interface or None, filter=bpf_filter or None,
+                      count=count, store=False,
+                      stop_filter=lambda p: stop_event.is_set(),
+                      prn=lambda p: reporter.report(normalise_scapy(p)))
+            else:
+                sniff_rawsocket(interface, count, reporter)
+        except PermissionError:
+            line_queue.put("Permission denied - run as administrator / with sudo.")
+        except Exception as exc:
+            line_queue.put(f"Capture error: {exc}")
+
+    threading.Thread(target=capture_worker, daemon=True).start()
+    poll_queue()
+    root.mainloop()
+
+
+# ---------------------------------------------------------------------------
 # Entry point
 # ---------------------------------------------------------------------------
 
@@ -422,6 +532,8 @@ def main():
                         help="hexdump the application payload")
     parser.add_argument("--payload-bytes", type=int, default=96,
                         help="max payload bytes to dump (default 96)")
+    parser.add_argument("--gui", action="store_true",
+                        help="show output in a popup window instead of the terminal")
     args = parser.parse_args()
 
     backend = args.backend
@@ -431,6 +543,11 @@ def main():
             backend = "scapy"
         except ImportError:
             backend = "rawsocket"
+
+    if args.gui:
+        run_gui(backend, args.interface, args.count, args.filter,
+                args.write, args.payload, args.payload_bytes)
+        return
 
     reporter = Reporter(args.write, args.payload, args.payload_bytes)
     print(C.p(f"Sniffing with the {backend} backend"
