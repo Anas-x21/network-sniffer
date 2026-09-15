@@ -445,6 +445,14 @@ def run_gui(backend, interface, count, bpf_filter, write, show_payload, payload_
     tk.Label(header, textvariable=count_var, fg="#9cdcfe", bg="#1e1e1e",
              font=("Segoe UI", 10, "bold")).pack(side="right")
 
+    def stop_capture():
+        stop_event.set()
+        status_var.set(status_var.get().replace("  [FINISHED]", "") + "  [STOPPED]")
+
+    stop_btn = tk.Button(header, text="Stop", command=stop_capture,
+                         bg="#3a3a3a", fg="white", relief="flat", padx=10)
+    stop_btn.pack(side="right", padx=(0, 12))
+
     mono = tkfont.Font(family="Consolas", size=10)
     text = scrolledtext.ScrolledText(root, bg="#1e1e1e", fg="#d4d4d4",
                                       insertbackground="white", font=mono,
@@ -500,10 +508,22 @@ def run_gui(backend, interface, count, bpf_filter, write, show_payload, payload_
             line_queue.put("Permission denied - run as administrator / with sudo.")
         except Exception as exc:
             line_queue.put(f"Capture error: {exc}")
+        finally:
+            if not stop_event.is_set():
+                line_queue.put("")
+                line_queue.put(f"-- capture finished: {reporter.count} packets. "
+                               f"Close this window when you're done. --")
+                status_var.set(status_var.get() + "  [FINISHED]")
 
     threading.Thread(target=capture_worker, daemon=True).start()
     poll_queue()
-    root.mainloop()
+    try:
+        root.mainloop()
+    except KeyboardInterrupt:
+        # Ctrl+C should stop capturing, not close the window -
+        # you still want to read what was captured.
+        stop_capture()
+        root.mainloop()
 
 
 # ---------------------------------------------------------------------------
