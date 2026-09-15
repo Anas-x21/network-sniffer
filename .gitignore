@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+*.log
+capture.log
+.vscode/
+.venv/
+venv/
+*.pcap
